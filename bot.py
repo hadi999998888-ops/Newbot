@@ -24,7 +24,7 @@ from telegram.ext import (
 
 # ================= НАСТРОЙКИ =================
 
-TOKEN = os.getenv("BOT_TOKEN", "8851146187:AAH5XP6CUR3L1JzhPwdUluGqCq2ADZQje6w")
+TOKEN = os.getenv("BOT_TOKEN", "8905175157:AAEXGCH_Cx2On1uH0JMuBoEuxDB3I2F52N0")
 ADMIN_ID = 8161017993
 CHANNEL = "https://t.me/+lyHMe0599OtjYjEy"
 PHOTO = "Start.jpg"
