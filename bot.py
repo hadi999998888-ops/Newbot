@@ -5,6 +5,7 @@ import random
 import string
 from pathlib import Path
 
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -12,16 +13,21 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters,
 )
 
-# ========== НАСТРОЙКИ ==========
+# ============== НАСТРОЙКИ ==============
 
 TOKEN = "8905175157:AAHdpAr0MQnTiKdwsuCQsbsxd57IYm644UI"
+OPENROUTER_API_KEY = "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"
+
 ADMIN_ID = 8161017993
 CHANNEL_ID = -1003939640142
 CHANNEL_LINK = "https://t.me/+lyHMe0599OtjYjEy"
+
+MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 PHOTO = Path(__file__).parent / "Start.jpg"
 
 logging.basicConfig(level=logging.INFO)
@@ -29,44 +35,47 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-# ========== КНОПКИ ==========
+# ============== КЛАВИАТУРЫ ==============
 
-def make_keyboard(rows):
+def kb(rows):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(text, callback_data=data) for text, data in row]
-        for row in rows
+        [InlineKeyboardButton(text, callback_data=data)]
+        for text, data in rows
     ])
 
 
-def subscription_keyboard():
+def sub_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")],
+        [InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub")],
     ])
 
 
 def main_keyboard():
-    return make_keyboard([
-        [("Генератор юзов", "generator")],
-        [("Профиль", "profile"), ("Связь с админом", "contact")],
+    return kb([
+        ("🔤 Генератор юзов", "generator"),
+        ("👤 Профиль", "profile"),
+        ("🤖 AI Beta", "ai"),
+        ("🔰 Вопрос к Ceko", "contact"),
     ])
 
 
 def generator_keyboard():
-    return make_keyboard([
-        [("🎲 Случайный ник", "nick_random")],
-        [("Ник на 5 букв", "nick5"), ("Ник на 7 букв", "nick7")],
-        [("⬅️ Назад", "menu")],
+    return kb([
+        ("🎲 Случайный ник", "nick_random"),
+        ("🔤 Ник на 5 букв", "nick5"),
+        ("🔠 Ник на 7 букв", "nick7"),
+        ("⬅️ Назад", "menu"),
     ])
 
 
-def back_keyboard():
-    return make_keyboard([[("⬅️ Назад", "menu")]])
+def back_keyboard(target="menu"):
+    return kb([("⬅️ Назад", target)])
 
 
-# ========== ОТОБРАЖЕНИЕ START.JPG ==========
+# ============== ОТПРАВКА ЭКРАНОВ ==============
 
-async def show_screen(chat_id, context, text, buttons=None):
+async def screen(chat_id, context, text, buttons=None):
     if PHOTO.is_file():
         with PHOTO.open("rb") as photo:
             await context.bot.send_photo(
@@ -78,92 +87,115 @@ async def show_screen(chat_id, context, text, buttons=None):
     else:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⚠️ Файл Start.jpg не найден.\n\n{text}",
+            text="⚠️ Не найден файл Start.jpg\n\n" + text,
             reply_markup=buttons,
         )
 
 
-# ========== ПРОВЕРКА ПОДПИСКИ ==========
-
-async def is_subscribed(user_id, context):
+async def subscribed(user_id, context):
     try:
-        member = await context.bot.get_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id,
-        )
+        member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ("member", "administrator", "creator")
     except TelegramError:
-        logger.exception("Не удалось проверить подписку")
+        logger.exception("Ошибка проверки подписки")
         return False
 
 
-async def require_subscription(query, context):
-    if await is_subscribed(query.from_user.id, context):
-        return True
-
-    await show_screen(
-        query.message.chat_id,
-        context,
-        "📢 Чтобы продолжить, подпишись на канал и нажми кнопку проверки.",
-        subscription_keyboard(),
-    )
-    return False
-
-
-# ========== СТАРТ ==========
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["contact_mode"] = False
-
-    await show_screen(
-        update.effective_chat.id,
-        context,
-        f"Добро пожаловать в Ceko Hub, {update.effective_user.first_name}!\n\n"
-        "Подпишись на канал, чтобы продолжить.",
-        subscription_keyboard(),
-    )
-
-
-# ========== ГЕНЕРАТОР ЮЗОВ ==========
-
-def generate_nick(length):
-    letters = string.ascii_lowercase
-    return "".join(random.choices(letters, k=length))
-
-
-async def generate_nickname(query, context, length):
-    chat_id = query.message.chat_id
-
-    await show_screen(
+async def open_menu(chat_id, context):
+    await screen(
         chat_id,
         context,
-        "🐍 Рассматриваю варианты...",
+        "🌊 Ceko Hub Приветствует!\n\n"
+        "Выбери нужный раздел.",
+        main_keyboard(),
     )
 
-    await asyncio.sleep(2)
 
-    nickname = generate_nick(length)
+# ============== СТАРТ ==============
 
-    await show_screen(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    context.user_data["contact_mode"] = False
+    context.user_data["ai_mode"] = False
+
+    if await subscribed(user.id, context):
+        await open_menu(update.effective_chat.id, context)
+    else:
+        await screen(
+            update.effective_chat.id,
+            context,
+            "🔰 Ceko Hub Приветствует!\n\n"
+            "Чтобы продолжить, подпишись на канал.\n"
+            "После подписки доступ откроется автоматически.",
+            sub_keyboard(),
+        )
+
+
+# ============== АВТОДОСТУП ПОСЛЕ ПОДПИСКИ ==============
+
+async def chat_member_update(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    change = update.chat_member
+    if not change or change.chat.id != CHANNEL_ID:
+        return
+
+    old_status = change.old_chat_member.status
+    new_status = change.new_chat_member.status
+
+    was_subscribed = old_status in ("member", "administrator", "creator")
+    is_subscribed = new_status in ("member", "administrator", "creator")
+
+    if not was_subscribed and is_subscribed:
+        user_id = change.new_chat_member.user.id
+
+        try:
+            await screen(
+                user_id,
+                context,
+                "✅ Подписка подтверждена!\n\n"
+                "Добро пожаловать в Ceko Hub!",
+                main_keyboard(),
+            )
+        except TelegramError:
+            logger.exception("Не удалось автоматически открыть меню")
+
+
+# ============== ГЕНЕРАТОР ЮЗОВ ==============
+
+def make_nick(length):
+    return "".join(random.choices(string.ascii_lowercase, k=length))
+
+
+async def generate_nick_screen(query, context, length):
+    chat_id = query.message.chat_id
+
+    await screen(chat_id, context, "🐍 Генерирую подходящий юз...")
+    await asyncio.sleep(1.5)
+
+    nickname = make_nick(length)
+
+    await screen(
         chat_id,
         context,
         f"✨ Твой юз: {nickname}\n\n"
-        f"Длина: {length} букв.",
-        make_keyboard([
-            [("🔄 Ещё вариант", f"nick{length}")],
-            [("⬅️ К генератору", "generator")],
-            [("🏠 Главное меню", "menu")],
+        f"Количество букв: {length}",
+        kb([
+            ( "🔄 Ещё вариант", f"nick{length}"),
+            ("⬅️ К генератору", "generator"),
+            ("🏠 Главное меню", "menu"),
         ]),
     )
 
 
-# ========== ПРОФИЛЬ ==========
+# ============== ПРОФИЛЬ ==============
 
 async def show_profile(query, context):
     user = query.from_user
     username = f"@{user.username}" if user.username else "Не установлен"
 
-    await show_screen(
+    await screen(
         query.message.chat_id,
         context,
         "👤 ПРОФИЛЬ\n\n"
@@ -174,7 +206,111 @@ async def show_profile(query, context):
     )
 
 
-# ========== КНОПКИ ==========
+# ============== OPENROUTER AI ==============
+
+def openrouter_request(messages):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Title": "Ceko Hub AI Beta",
+    }
+
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "reasoning": {"enabled": True},
+        "max_tokens": 1200,
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=90,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    choice = data["choices"][0]
+    assistant_message = choice["message"]
+
+    # Сохраняем полный объект ответа, включая reasoning_details,
+    # чтобы передать их обратно при следующем запросе.
+    return assistant_message
+
+
+async def ai_reply(update, context, user_text):
+    chat_id = update.effective_chat.id
+
+    history = context.user_data.setdefault("ai_history", [])
+
+    history.append({"role": "user", "content": user_text})
+
+    # Ограничиваем историю, чтобы не раздувать запросы.
+    history[:] = history[-16:]
+
+    await screen(chat_id, context, "🤖 AI Beta думает...")
+
+    try:
+        answer = await asyncio.to_thread(
+            openrouter_request,
+            list(history),
+        )
+
+        content = answer.get("content")
+        if not isinstance(content, str) or not content.strip():
+            content = "Модель не вернула текстовый ответ. Попробуй ещё раз."
+
+        history.append({
+            "role": "assistant",
+            "content": content,
+            **(
+                {"reasoning_details": answer["reasoning_details"]}
+                if answer.get("reasoning_details") is not None
+                else {}
+            ),
+        })
+        history[:] = history[-16:]
+
+        # Текстовые сообщения Telegram ограничены по длине.
+        for start_index in range(0, len(content), 4000):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=content[start_index:start_index + 4000],
+            )
+
+        await screen(
+            chat_id,
+            context,
+            "🤖 AI Beta\n\nНапиши следующий вопрос или выйди в меню.",
+            kb([
+                ("🧹 Очистить историю", "ai_clear"),
+                ("⬅️ В меню", "menu"),
+            ]),
+        )
+
+    except requests.RequestException:
+        logger.exception("Ошибка запроса OpenRouter")
+        await screen(
+            chat_id,
+            context,
+            "⚠️ AI Beta временно недоступен.\n"
+            "Проверь API-ключ, доступность модели и попробуй позже.",
+            back_keyboard("ai"),
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        logger.exception("Неожиданный ответ OpenRouter")
+        await screen(
+            chat_id,
+            context,
+            "⚠️ Не удалось обработать ответ ИИ. Попробуй ещё раз.",
+            back_keyboard("ai"),
+        )
+
+
+# ============== КНОПКИ ==============
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -185,73 +321,95 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
 
     if data == "check_sub":
-        if not await is_subscribed(user.id, context):
+        if await subscribed(user.id, context):
+            await open_menu(chat_id, context)
+        else:
             await query.answer(
-                "Подписка не найдена. Подпишись и попробуй снова.",
+                "Подписка пока не обнаружена. Попробуй чуть позже.",
                 show_alert=True,
             )
-            return
-
-        context.user_data["contact_mode"] = False
-        await show_screen(
-            chat_id,
-            context,
-            "✅ Подписка подтверждена!\n\nВыбери пункт меню.",
-            main_keyboard(),
-        )
         return
 
-    if not await require_subscription(query, context):
+    if not await subscribed(user.id, context):
+        await screen(
+            chat_id,
+            context,
+            "📢 Сначала подпишись на канал.",
+            sub_keyboard(),
+        )
         return
 
     if data == "menu":
         context.user_data["contact_mode"] = False
-        await show_screen(
-            chat_id,
-            context,
-            "Ceko Hub\n\nВыбери нужный раздел.",
-            main_keyboard(),
-        )
+        context.user_data["ai_mode"] = False
+        await open_menu(chat_id, context)
 
     elif data == "generator":
         context.user_data["contact_mode"] = False
-        await show_screen(
+        context.user_data["ai_mode"] = False
+        await screen(
             chat_id,
             context,
-            "🔤 ГЕНЕРАТОР ЮЗОВ\n\nВыбери вариант генерации.",
+            "🔤 ГЕНЕРАТОР ЮЗОВ\n\nВыбери вариант:",
             generator_keyboard(),
         )
 
     elif data == "profile":
         context.user_data["contact_mode"] = False
+        context.user_data["ai_mode"] = False
         await show_profile(query, context)
 
-    elif data == "nick5":
+    elif data in ("nick5", "nick7", "nick_random"):
         context.user_data["contact_mode"] = False
-        await generate_nickname(query, context, 5)
+        context.user_data["ai_mode"] = False
 
-    elif data == "nick7":
+        length = {
+            "nick5": 5,
+            "nick7": 7,
+            "nick_random": random.randint(4, 10),
+        }[data]
+
+        await generate_nick_screen(query, context, length)
+
+    elif data == "ai":
         context.user_data["contact_mode"] = False
-        await generate_nickname(query, context, 7)
-
-    elif data == "nick_random":
-        context.user_data["contact_mode"] = False
-        await generate_nickname(query, context, random.randint(4, 10))
-
-    elif data == "contact":
-        context.user_data["contact_mode"] = True
-        await show_screen(
+        context.user_data["ai_mode"] = True
+        await screen(
             chat_id,
             context,
-            "💬 СВЯЗЬ С АДМИНОМ\n\n"
+            "🤖 AI BETA\n\n"
+            "Напиши сообщение, и ИИ ответит.\n"
+            "История диалога сохраняется до очистки или перезапуска бота.",
+            kb([
+                ("🧹 Очистить историю", "ai_clear"),
+                ("⬅️ В меню", "menu"),
+            ]),
+        )
+
+    elif data == "ai_clear":
+        context.user_data["ai_history"] = []
+        context.user_data["ai_mode"] = True
+        await screen(
+            chat_id,
+            context,
+            "🧹 История AI Beta очищена.\n\nНапиши новый вопрос.",
+            back_keyboard("ai"),
+        )
+
+    elif data == "contact":
+        context.user_data["ai_mode"] = False
+        context.user_data["contact_mode"] = True
+        await screen(
+            chat_id,
+            context,
+            "🔰 ВОПРОС К CEKO\n\n"
             "Отправь сообщение, фото или файл. "
-            "Я передам его администратору.\n\n"
-            "Чтобы выйти, нажми «Назад».",
+            "Я передам его администратору.",
             back_keyboard(),
         )
 
 
-# ========== СООБЩЕНИЯ И ОТВЕТЫ АДМИНА ==========
+# ============== СООБЩЕНИЯ И СВЯЗЬ С АДМИНОМ ==============
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -260,7 +418,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not user:
         return
 
-    # Ответ админа на карточку обращения пользователя
+    # Ответ администратора на карточку обращения.
     if user.id == ADMIN_ID and message.reply_to_message:
         original = message.reply_to_message
         original_text = original.text or original.caption or ""
@@ -278,37 +436,60 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     from_chat_id=message.chat_id,
                     message_id=message.message_id,
                 )
-                await message.reply_text("✅ Ответ отправлен.")
+                await message.reply_text("✅ Ответ отправлен пользователю.")
             except (ValueError, StopIteration):
                 await message.reply_text("❌ Не удалось определить пользователя.")
             except TelegramError:
-                logger.exception("Ошибка доставки ответа")
+                logger.exception("Ошибка отправки ответа")
                 await message.reply_text("❌ Не удалось доставить ответ.")
         return
 
     if user.id == ADMIN_ID:
         return
 
-    if not context.user_data.get("contact_mode"):
-        return
-
-    if not await is_subscribed(user.id, context):
-        await show_screen(
+    if not await subscribed(user.id, context):
+        await screen(
             message.chat_id,
             context,
-            "Сначала подпишись на канал.",
-            subscription_keyboard(),
+            "📢 Сначала подпишись на канал.",
+            sub_keyboard(),
         )
         return
 
-    username = f"@{user.username}" if user.username else "не установлен"
+    # Сообщения в режиме AI Beta.
+    if context.user_data.get("ai_mode"):
+        if not message.text:
+            await screen(
+                message.chat_id,
+                context,
+                "Пока AI Beta принимает только текстовые сообщения.",
+                back_keyboard("ai"),
+            )
+            return
 
+        if not OPENROUTER_API_KEY or OPENROUTER_API_KEY == "ВСТАВЬ_OPENROUTER_API_KEY":
+            await screen(
+                message.chat_id,
+                context,
+                "⚠️ Сначала настрой API-ключ OpenRouter.",
+                back_keyboard("ai"),
+            )
+            return
+
+        await ai_reply(update, context, message.text)
+        return
+
+    # Сообщения администратору.
+    if not context.user_data.get("contact_mode"):
+        return
+
+    username = f"@{user.username}" if user.username else "не установлен"
     info = (
         "📩 Сообщение от пользователя\n"
         f"Имя: {user.first_name or 'Не указано'}\n"
         f"Username: {username}\n"
         f"ID: {user.id}\n\n"
-        "Ответь на это сообщение, чтобы ответить пользователю."
+        "Ответь на это сообщение, чтобы написать пользователю."
     )
 
     try:
@@ -319,15 +500,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_id=message.message_id,
         )
 
-        await show_screen(
+        await screen(
             message.chat_id,
             context,
-            "✅ Сообщение отправлено администратору.",
+            "✅ Сообщение передано администратору.",
             back_keyboard(),
         )
     except TelegramError:
-        logger.exception("Ошибка пересылки")
-        await show_screen(
+        logger.exception("Ошибка передачи сообщения")
+        await screen(
             message.chat_id,
             context,
             "❌ Не удалось отправить сообщение. Попробуй позже.",
@@ -335,23 +516,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========== ЗАПУСК ==========
+# ============== ЗАПУСК ==============
 
 def main():
-    if TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_ОТ_BOTFATHER":
-        raise RuntimeError("Вставь новый токен бота в TOKEN.")
+    if not TOKEN or TOKEN == "ВСТАВЬ_НОВЫЙ_TELEGRAM_ТОКЕН":
+        raise RuntimeError("Вставь новый токен Telegram-бота.")
 
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(ChatMemberHandler(
+        chat_member_update,
+        ChatMemberHandler.CHAT_MEMBER,
+    ))
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, message_handler)
     )
 
-    logger.info("Ceko Hub запускается")
-    app.run_polling()
+    logger.info("Ceko Hub запущен")
+    app.run_polling(
+        allowed_updates=[
+            "message",
+            "callback_query",
+            "chat_member",
+        ]
+    )
 
 
 if __name__ == "__main__":
     main()
-     
+        
